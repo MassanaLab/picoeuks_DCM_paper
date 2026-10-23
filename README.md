@@ -11,7 +11,9 @@ Béjar-Queijas, S., Obiol, A., Deulofeu-Capo, O., Marín-Vindas, C., Gazulla, C.
 
 1. Download all scripts and data by using:
 
+```
 git clone https://github.com/MassanaLab/picoeuks_DCM_paper.git
+```
 
 2. Install the following R packages: 
 
