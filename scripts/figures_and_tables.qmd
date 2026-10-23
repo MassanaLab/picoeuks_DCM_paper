@@ -1,0 +1,1073 @@
+---
+title: "Data and code for *Picoeukaryotic taxa display similar vertical preferences across the Deep Chlorophyll Maximum in contrasting oceanic regions*"
+format: html
+editor: source
+---
+
+## Load packages and functions
+
+```{r}
+source("aux_functions.R")
+```
+
+## Load data
+
+```{r}
+phy_table_pico_raw <- readRDS("../data/phyloseq/EukEMM_v3.2_DCM_pico.rds")
+phy_table_photo_raw <- readRDS("../data/phyloseq/EukEMM_v3.2_DCM_phototrophs.rds")
+phy_table_phago_raw <- readRDS("../data/phyloseq/EukEMM_v3.2_DCM_phagotrophs.rds")
+
+clusters_metadata <-
+  read_tsv("../data/metadata/clusters_metadata.tsv") |>
+  mutate(
+    profile_abb = factor(profile_abb, levels = c("RD1", "RD2", "RD3", "RD4", "MD", "MM", "MS", "MD2", "P04", "P08", "P10", "P11", "P18", "P26"))
+  ) |>
+  arrange(profile_abb)
+
+fluorescence_data_clustering <- 
+  read_tsv("../data/metadata/fluorescence.tsv") 
+
+outgroups <- 
+  read_tsv('../data/metadata/outgroups.tsv')
+
+trees_parameters <- 
+  read_tsv('../data/metadata/trees_parameters.tsv') |> 
+  group_by(Group) |> 
+  summarise(
+    parameters = list(pick(xlim1, xlim2)),
+    .groups = "drop"
+  ) |> 
+  deframe()
+
+tree_files <- 
+  order_trees |> 
+  set_names() |> 
+  map(
+    ~ read.tree(str_c('../data/trees/trees/',.x,'.treefile'))
+  )
+
+metadata_dcm <- 
+  read_tsv('../data/metadata/metadata_dcms.tsv')
+
+temperature_dcm <- 
+  read_tsv('../data/metadata/dcm_temperature.tsv')
+
+fluorescence_env_variables <- 
+  read_tsv('../data/metadata/fluorescence_fig2.tsv')
+
+samples_metadata <- 
+  read_tsv("../data/metadata/samples_metadata.tsv") |> 
+  mutate(profile_abb = fct_inorder(profile_abb))
+```
+
+## Process data
+
+### Environmental data
+
+```{r}
+profiles <- 
+  levels(samples_metadata$profile_abb)
+
+metadata_dcm_filtered <- 
+  metadata_dcm |> 
+  select(profile_abb = profile_id, Depth, Nitrate, `Peuk 1`, `Peuk 2`, Nanoeuk) |> 
+  rename_with(.cols = everything(), ~ str_replace(tolower(.x),' ','_')) |> 
+  rowwise() |> 
+  mutate(peuk = if_else(!is.na(peuk_1), sum(peuk_1, peuk_2, na.rm = T), NA),
+         peuk = peuk/100,
+         nanoeuk = nanoeuk/100) |> 
+  ungroup() |> 
+  mutate(profile_abb = factor(profile_abb, levels = profiles))
+
+metadata_dcm_tidy <- 
+  metadata_dcm_filtered |> 
+  select(-c(contains('Peuk_'))) |> 
+  pivot_longer(-c(profile_abb, depth)) |> 
+  mutate(name = factor(name, levels = c('nitrate','peuk', 'nanoeuk')))
+
+temperature_dcm_df <- 
+  temperature_dcm |> 
+  mutate(profile_abb = factor(profile_id, levels = levels(profiles)))
+
+nitrate_values <- 
+  profiles |> 
+  set_names() |> 
+  map(
+    ~ metadata_dcm_tidy |>
+      filter(profile_abb == .x,
+             name == 'nitrate') |> 
+      select(depth, nitrate = value)
+  )
+
+temperature_values <- 
+  profiles |> 
+  set_names() |> 
+  map(
+    ~ temperature_dcm_df |>
+      filter(profile_abb == .x) |> 
+      select(depth, temperature = value)
+  )
+
+fluorescence_values <- 
+  profiles |> 
+  set_names() |> 
+  map(
+    ~ fluorescence_env_variables |>
+      filter(profile_abb == .x) |> 
+      select(depth = Depth, fluorescence = Smoothed_Fluorescence)
+  )  
+
+sampling_values <- 
+  profiles |> 
+  set_names() |> 
+  map(
+    ~ samples_metadata |> 
+      filter(profile_abb == .x) |> 
+      left_join(
+        fluorescence_values[[.x]] |> 
+          group_by(depth) |> 
+          slice_head(n = 1),
+        by = join_by(closest(depth <= depth))) |> 
+      select(-depth.x) |> 
+      dplyr::rename(depth = depth.y)
+  )
+
+peuk_values <- 
+  profiles |> 
+  set_names() |> 
+  map(
+    ~ metadata_dcm_tidy |>
+      filter(profile_abb == .x,
+             name == 'peuk') |> 
+      select(depth, peuk = value)
+  )
+
+neuk_values <- 
+  profiles |> 
+  set_names() |> 
+  map(
+    ~ metadata_dcm_tidy |>
+      filter(profile_abb == .x,
+             name == 'nanoeuk') |> 
+      select(depth, neuk = value)
+  )
+```
+
+
+### Phyloseq objects
+
+```{r}
+phy_table_pico <-
+  phy_table_pico_raw
+
+phy_table_photo <-
+  phy_table_photo_raw
+
+phy_table_phago <-
+  phy_table_phago_raw
+
+new_metadata <-
+  sample_data(phy_table_pico_raw) |>
+  as_tibble() |>
+  mutate(
+    St =
+      case_when(
+        Project == "MIAU Catalan Sea" ~ str_c(Station, "_MIAU"),
+        Project == "POSEIDON Atlantic" & nchar(Station) == 2 ~ str_c(Station, "_POSEIDON"),
+        Project == "POSEIDON Atlantic" & nchar(Station) == 1 ~ str_c("0", Station, "_POSEIDON"),
+        Project == "REMEI Catalan Sea" & Lat %in% c("41.0358", "40.8333") ~ "D1_REMEI",
+        Project == "REMEI Catalan Sea" & Lat == "40.8386" ~ "D2_REMEI",
+        Project == "REMEI Catalan Sea" & Lat == "41.0692" ~ "D3_REMEI",
+        Project == "REMEI Catalan Sea" & Lat == "41.0719" ~ "D4_REMEI"
+      )
+  ) |>
+  sample_data()
+
+sample_data(phy_table_pico) <- new_metadata
+sample_data(phy_table_photo) <- new_metadata
+sample_data(phy_table_phago) <- new_metadata
+
+phy_tables <-
+  c(phy_table_pico, phy_table_photo, phy_table_phago) |>
+  set_names(c("pico", "photo", "phago"))
+
+profile_names <-
+  phy_table_pico |>
+  sample_data() |>
+  as_tibble() |>
+  pull(St) |>
+  unique()
+
+clusters_per_profile <-
+  c("pico", "photo", "phago") |>
+  set_names() |>
+  map(
+    ~ clusters_metadata |>
+      filter(trophic == .x) |>
+      select(profile, nclusters) |>
+      deframe()
+  )
+
+cluster_names <-
+  c("pico", "photo", "phago") |>
+  set_names() |>
+  map(
+    ~ clusters_metadata |>
+      filter(trophic == .x) |>
+      pivot_longer(names_to = "cluster_name", values_to = "cluster", c(Surface, contains("Above"), DCM, Below, Deep)) |>
+      mutate(
+        cluster = as.character(cluster),
+        cluster_name = factor(cluster_name, levels = c("Surface", "Above1", "Above2", "DCM", "Below", "Deep"))
+      ) |>
+      select(profile, profile_abb, cluster_name, cluster)
+  )
+
+profiles_abb <-
+  clusters_metadata |>
+  distinct(profile_abb, profile)
+
+metadata_df <-
+  phy_tables$pico |>
+  sample_data() |>
+  as_tibble() |>
+  select(sample = .sample, depth = Depth, profile = St) |>
+  left_join(profiles_abb)
+```
+### Fluorescence data
+
+```{r}
+fluorescence_smoothed <-
+  fluorescence_data_clustering |>
+  filter(Depth < 210) |> 
+  mutate(smoothed_fluorescence = Smoothed_Fluorescence * 100) |> 
+  mutate(smoothed_fluorescence = if_else(DCM_type == '11_POSEIDON' & Depth > 200, NA_real_, smoothed_fluorescence)) |> 
+  select(profile = DCM_type, depth = Depth, smoothed_fluorescence) |>
+  left_join(profiles_abb) |> 
+  filter(!is.na(smoothed_fluorescence))
+
+base_plot_fluorescence <-
+  ggplot() +
+  geom_area(
+    data = fluorescence_smoothed,
+    aes(y = depth, x = smoothed_fluorescence),
+    fill = "grey65", alpha = 0.5, stat = "identity", position = "identity", orientation = "y"
+  )
+```
+
+### Fuzzy clustering
+
+#### Clustering
+
+```{r}
+clusters_df <-
+  phy_tables |>
+  imap(
+    ~ clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile[[.y]],
+      phy_table = .x,
+      get_clusters_long = T,
+      min_occur = 1,
+      cluster_names = cluster_names[[.y]]
+    )
+  )
+```
+
+#### Summaries
+
+```{r}
+cluster_summaries <-
+  clusters_df |>
+  map(
+    ~ .x |>
+      filter(!is.na(cluster_name)) |>
+      mutate(
+        cluster_name =
+          case_when(
+            str_detect(cluster_name, "Above") ~ str_remove(cluster_name, "[12]"), # unify duplicated layers into one
+            TRUE ~ cluster_name
+          ),
+        cluster_name = factor(cluster_name, levels = c("Surface", "Above", "DCM", "Below", "Deep"))
+      ) |>
+      group_by(profile_abb, Group, Supergroup, cluster_name) |>
+      summarise(perc = sum(perc), .groups = "drop") |>
+      group_by(profile_abb, cluster_name) |>
+      mutate(perc = 100 * perc / sum(perc)) |>
+      mutate(
+        layer =
+          case_when(
+            cluster_name == "Above" ~ "Upper",
+            cluster_name == "Below" ~ "Lower",
+            TRUE ~ cluster_name
+          ),
+        layer = factor(layer, levels = c("Surface", "Upper", "DCM", "Inter", "Lower", "Deep"))
+      )
+  )
+
+cluster_summaries_all <- 
+  cluster_summaries |>
+  map(
+    ~ .x |> 
+      ungroup() |> 
+      filter(layer %in% c('Surface', 'DCM', 'Deep')) |>
+      select(-cluster_name) |> 
+      group_by(layer, Group) |>
+      pivot_wider(names_from = c(profile_abb, layer), values_from = perc, values_fill = 0) |> # strange way to complete missing values
+      pivot_longer(-c(Group, Supergroup), values_to = 'perc') |> 
+      separate(name, into = c('profile_abb', 'layer'), sep = '_') |> 
+      mutate(profile_abb = factor(profile_abb, levels = levels(profiles)),
+             layer = factor(layer, levels = c("Surface", "Upper", "DCM", "Inter", "Lower", "Deep"))) |> 
+      group_by(Group, layer) |> 
+      summarise(mean_perc = mean(perc), .groups = "drop_last")
+  ) 
+
+cluster_summaries_to_export <- 
+  cluster_summaries |> 
+  imap(
+     ~ .x |> 
+       ungroup() |> 
+       select(-cluster_name) |> 
+       arrange(layer) |> 
+       pivot_wider(names_from = c(profile_abb, layer), values_from = perc, values_fill = 0) |> 
+       left_join(
+         cluster_summaries_all[[.y]] |> 
+           pivot_wider(names_from = layer, values_from = mean_perc, values_fill = 0)
+       ) |> 
+       left_join( # include totals
+         cluster_summaries_all[[.y]] |> 
+           group_by(Group) |> 
+           summarise(total_perc = sum(mean_perc))
+       ) |> 
+       arrange(-total_perc)
+  )
+
+asv_summaries <- 
+  c('photo','phago') |> 
+  set_names() |> 
+  map(
+    ~ clusters_df[[.x]] |> 
+      select(-profile_abb) |> 
+      left_join(profiles_abb) |>
+      mutate(
+        cluster =
+          case_when(
+            str_detect(cluster_name, "Deep|Above") ~ str_remove(cluster_name, "[12]"), # unify duplicated layers into one
+            is.na(cluster_name) ~ cluster,
+            TRUE ~ cluster_name
+          )
+      ) |>  
+      distinct(asv_id, Group, Supergroup, profile_abb, cluster) |> 
+      arrange(profile_abb) |> 
+      pivot_wider(names_from = profile_abb, values_from = cluster, values_fill = 'absent')
+  )
+
+clusters_per_asv <- 
+  asv_summaries |> 
+  map(
+    ~ .x |> 
+      pivot_longer(names_to = 'profile_abb', values_to = 'cluster', -c(asv_id, Group, Supergroup)) |> 
+      filter(!cluster %in% c('low_abundance','absent')) |> 
+      count(asv_id, Group, Supergroup, name = 'nclusters')
+  )
+
+asv_mean_abundance_and_occur <- 
+  phy_tables |> 
+  map(
+    ~ {
+      taxa_sums(transform_sample_counts(physeq = .x, fun = percentage)) |> 
+        as_tibble(rownames = 'asv_id') |> 
+        mutate(mean_perc = value/154) |> # divide by num of samples
+        left_join(
+          rowSums(otu_table(.x) > 0) |> 
+            as_tibble(rownames = 'asv_id') |> 
+            dplyr::rename(occur = value)
+        ) |> 
+        left_join(
+          tax_table(.x) |> as_tibble() |> select(asv_id = .otu, Group, ASV)
+        )
+    } 
+  ) |> 
+  bind_rows(.id = 'trophic') |> 
+  select(-value) |> 
+  arrange(-mean_perc)
+```
+
+
+
+### Trees
+
+#### Associated data
+
+```{r}
+asvs_for_tree <- # apply a threshold of minimum 4 clusters
+  clusters_per_asv |> 
+  bind_rows(.id = 'trophic') |> 
+  filter(nclusters >= 4,
+         Group %in% order_trees) |> 
+  left_join(
+    tax_table(phy_table_pico) |> 
+      as_tibble() |> 
+      select(asv_id = .otu, ASV, subclade = Taxon_second_rank)
+  ) |> 
+  left_join(
+    asv_mean_abundance_and_occur |> select(-c(Group, ASV))
+  ) |> 
+  filter(
+    subclade != 'Chimera' | is.na(subclade)
+  ) |> 
+  mutate(
+    name = 
+      if_else(
+        is.na(subclade),
+        str_c(asv_id, Group, round(mean_perc,2), occur, sep = '_'),
+        str_c(asv_id, subclade, round(mean_perc,2), occur, sep = '_')
+        )
+  )
+
+asv_data_for_trees <- 
+  asv_summaries |> 
+  map(
+    ~ .x |> 
+      pivot_longer(names_to = 'profile_abb', values_to = 'cluster', -c(asv_id, Group, Supergroup)) |> 
+      filter(!cluster %in% c('low_abundance','absent', 'low_membership')) |> 
+      mutate(
+        cluster2 =
+          case_when(
+            cluster == 'Above' ~ 'Surface',
+            cluster == 'Below' ~ 'Deep',
+            TRUE ~ cluster
+          )
+      ) |> 
+      count(asv_id, cluster2) |>
+      group_by(asv_id) |> 
+      mutate(
+        perc = 100*n/sum(n),
+        total_profiles = sum(n)
+        ) |> 
+      mutate(perc2 = 100*n / 14) |>  # total percentage divided by the 14 profiles
+      filter(asv_id %in% asvs_for_tree$asv_id) |> 
+      left_join(asvs_for_tree |> select(asv_id, Group, label = name))
+  ) |> 
+  bind_rows() |> 
+  mutate(cluster2 = factor(cluster2, levels = c('Surface','DCM','Deep')))
+
+nprofiles_per_biome <- 
+  asv_summaries |> 
+  map(
+    ~ .x |> 
+      pivot_longer(names_to = 'profile_abb', values_to = 'cluster', -c(asv_id, Group, Supergroup)) |> 
+      filter(!cluster %in% c('low_abundance','absent')) |> 
+      mutate(biome = 
+               case_when(
+                 cluster == 'low_membership' ~ 'Not clustered',
+                 str_detect(profile_abb, '^P') ~ 'Atlantic', 
+                 !str_detect(profile_abb, '^P') ~ 'Mediterranean'
+               )
+             ) |> 
+      count(asv_id, biome) |> 
+      left_join(asvs_for_tree |> distinct(asv_id, Group, label = name))
+  ) |> 
+  bind_rows(.id = 'trophic') |> 
+  mutate(biome = factor(biome, levels = c('Mediterranean', 'Atlantic', 'Not clustered')))
+
+asv_per_group <- 
+  asv_data_for_trees |> 
+  ungroup() |> 
+  distinct(asv_id, Group) |> 
+  count(Group) |> 
+  deframe()
+
+groups_to_trophic <- 
+  asv_summaries |> 
+  bind_rows(.id = 'trophic') |> 
+  distinct(Group, trophic)
+
+groups_for_fig6 <- 
+  c('Prymnesiophyceae', 'MAST-3')
+
+asvs_occurrence_trees <- 
+  groups_for_fig6 |> 
+  set_names() |> 
+  map(
+    ~ asv_data_for_trees |> 
+      ungroup() |> 
+      filter(Group == .x) |> 
+      select(label, cluster2, perc2, n) # |> 
+  )
+
+asvs_nprofiles_trees <- 
+  groups_for_fig6 |> 
+  set_names() |> 
+  map(
+    ~ nprofiles_per_biome |> 
+      ungroup() |> 
+      filter(Group == .x) |> 
+      select(label, biome, n)
+  )
+```
+
+#### Export fasta files to tree
+
+```{r}
+order_trees |> 
+  walk(
+    ~ asvs_for_tree |> 
+      filter(Group == .x) |> 
+      select(name, ASV) |> 
+      bind_rows(add_outgroup(group = .x, n = 5)) |> 
+      deframe() |> 
+      Biostrings::DNAStringSet() |> 
+      Biostrings::writeXStringSet(str_c('../data/trees/fasta/',.x,'.fasta'))
+  )
+```
+
+#### Process trees
+
+```{r}
+rooted_trees <- 
+  tree_files |> 
+  purrr::map(root_tree_at_outgroup)
+
+final_trees <- 
+  tree_files |> 
+  purrr::map(remove_outgroup)  
+```
+
+## Figures
+
+### Figure 2
+
+```{r}
+pdf("../figures/fig2.pdf", width = 12, height = 12)
+
+old_par <- par(no.readonly = TRUE)
+par(mfrow = c(3, 5))
+
+for (p in profiles) {
+    plot_env_variables(profile = p)
+}
+
+par(old_par)
+dev.off()
+```
+
+### Figure 3
+
+```{r}
+fig3a <- 
+  clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile$pico,
+      phy_table = phy_tables$pico,
+      cluster_names = cluster_names$pico,
+      min_occur = 1,
+      metadata_df = metadata_df,
+      plot_membership = F,
+      ncol = 7
+    ) +
+  theme(legend.position = 'top') + 
+  labs(y = 'Depth (m)')
+
+fig3b <- 
+   clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile$photo,
+      phy_table = phy_tables$photo,
+      cluster_names = cluster_names$photo,
+      min_occur = 1,
+      metadata_df = metadata_df,
+      plot_membership = F,
+      ncol = 7
+    ) +
+  guides(color = 'none', fill = 'none') + 
+  labs(y = 'Depth (m)')
+
+fig3c <- 
+   clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile$phago,
+      phy_table = phy_tables$phago,
+      cluster_names = cluster_names$phago,
+      min_occur = 1,
+      metadata_df = metadata_df,
+      plot_membership = F,
+      ncol = 7
+    ) +
+  guides(color = 'none', fill = 'none') + 
+  labs(x = 'Relative read abundance (%)', y = 'Depth (m)')
+
+fig3 <- 
+  wrap_plots(fig3a, fig3b, fig3c, ncol = 1) +
+  plot_annotation(tag_levels = 'A')
+
+ggsave(plot = fig3, filename = '../figures/fig3.pdf', height = 14, width = 10)
+```
+
+### Figure 4
+
+```{r}
+fig4a <-
+  distr_clusters_plotter(
+    group = 'pico', 
+    cluster_summary = cluster_summaries$pico,
+    keep_intermediate_layers = F
+    ) +
+  guides(fill =  guide_legend(nrow = 4, reverse = T, position = 'bottom', title = NULL))
+
+fig4b <-
+  distr_clusters_plotter(
+    group = 'photo', 
+    cluster_summary = cluster_summaries$photo,
+    keep_intermediate_layers = F
+    ) +
+  guides(fill =  guide_legend(nrow = 4, reverse = T, position = 'bottom', title = NULL))
+
+fig4c <-
+  distr_clusters_plotter(
+    group = 'phago', 
+    cluster_summary = cluster_summaries$phago,
+    keep_intermediate_layers = F
+    )  +
+  guides(fill =  guide_legend(nrow = 4, reverse = T, position = 'bottom', title = NULL))
+
+fig4 <- 
+  wrap_plots(
+    fig4a, fig4b, fig4c,
+    widths = c(.3,.3,.2)
+  ) + 
+  plot_annotation(tag_levels = 'A')
+
+ggsave(plot = fig4, filename = '../figures/fig4.pdf', height = 7, width = 12)
+```
+
+
+### Figure 5
+
+```{r}
+fig5_plots <-
+  list(
+    fig5_plotter(cluster_summaries_all$pico) + labs(x = NULL) + theme(legend.justification = c(1,0), legend.key.spacing.x = unit(.35,'cm')),
+    fig5_plotter(cluster_summaries_all$photo) + labs(x = NULL),
+    fig5_plotter(cluster_summaries_all$phago)+ theme(legend.justification = c(.87,0), legend.key.spacing.x = unit(.46,'cm'))
+  )
+
+fig5 <-
+  wrap_plots(fig5_plots, ncol = 1, heights = c(3, 3, 2)) +
+  plot_annotation(tag_levels = list(c("A", "B", "C")))
+
+ggsave(filename = '../figures/fig5.pdf', plot = fig5, height = 6, width = 5)
+```
+
+
+### Figure 6
+
+```{r}
+fig6a <- 
+  final_trees$Prymnesiophyceae |>
+  create_base_tree() |> 
+  add_geom_tile_occurrence(metadata_occurrence = asvs_occurrence_trees$Prymnesiophyceae) |> 
+  add_geom_col_biome(metadata_biomes = asvs_nprofiles_trees$Prymnesiophyceae) |> 
+  open_tree(angle = 180) +
+  plot_annotation(tag_levels = list('A'))
+
+fig6b <- 
+  final_trees$`MAST-3` |>
+  create_base_tree() |> 
+  add_geom_tile_occurrence(metadata_occurrence = asvs_occurrence_trees$`MAST-3`) |> 
+  add_geom_col_biome(metadata_biomes = asvs_nprofiles_trees$`MAST-3`, offset = .1) |> 
+  open_tree(angle = 180) +
+  plot_annotation(tag_levels = list('B'))
+
+ggsave(plot = fig6a, '../figures/fig6a.pdf', height = 7, width = 7)
+ggsave(plot = fig6b, '../figures/fig6b.pdf', height = 7, width = 7)
+# merge them with inkscape
+```
+
+### Figure S1
+
+```{r}
+pdf("../figures/figS1.pdf", width = 12, height = 12)
+
+old_par <- par(no.readonly = TRUE)
+par(mfrow = c(3, 5), mar = c(0, 0, 0, 0))
+
+for (p in profiles) {
+    plot_cell_counts(profile = p)
+}
+
+par(old_par)
+dev.off()
+```
+
+### Figure S2
+
+```{r}
+figS2a <- 
+  clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile$pico,
+      phy_table = phy_tables$pico,
+      cluster_names = cluster_names$pico,
+      min_occur = 1,
+      metadata_df = metadata_df,
+      plot_only_memberships = T,
+      ncol = 7
+    ) +
+  theme(legend.position = 'top') + 
+  labs(y = 'Depth (m)')
+
+figS2b <- 
+   clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile$photo,
+      phy_table = phy_tables$photo,
+      cluster_names = cluster_names$photo,
+      min_occur = 1,
+      metadata_df = metadata_df,
+      plot_only_memberships = T,
+      ncol = 7
+    ) +
+  guides(color = 'none', fill = 'none') + 
+  labs(y = 'Depth (m)')
+
+figS2c <- 
+   clusterer_and_plotter_occur(
+      n_clusters = clusters_per_profile$phago,
+      phy_table = phy_tables$phago,
+      cluster_names = cluster_names$phago,
+      min_occur = 1,
+      metadata_df = metadata_df,
+      plot_only_memberships = T,
+      ncol = 7
+    ) +
+  guides(color = 'none', fill = 'none') + 
+  labs(x = 'Relative read abundance (%)', y = 'Depth (m)')
+
+figS2 <- 
+  wrap_plots(figS2a, figS2b, figS2c, ncol = 1) +
+  plot_annotation(tag_levels = 'A')
+
+ggsave(plot = figS2, filename = '../figures/figS2.pdf', height = 14, width = 10)
+```
+
+
+### Figures S3 and S4
+
+```{r}
+p_cluster_summaries <-
+  cluster_summaries[c('pico','photo')] |>
+  imap(
+    ~ distr_clusters_plotter(group = .y, cluster_summary = .x)
+  )
+
+ggsave(
+  filename = "../figures/figS3.pdf",
+  plot =
+    p_cluster_summaries$pico +
+      guides(fill = guide_legend(ncol = 5, title = NULL, position = "bottom", reverse = T)) +
+      theme(
+        legend.box.spacing = unit(0.1, "cm"),
+        legend.justification = c(0.2, 0),
+        strip.text.y = element_text(size = 7.2)
+      ),
+  height = 6,
+  width = 6
+)
+
+ggsave(
+  filename = "../figures/figS4.pdf",
+  plot =
+    p_cluster_summaries$photo +
+      theme(legend.justification = c(0.2, 0)),
+  height = 6, width = 6
+)
+```
+
+### Figures S5 and S6
+
+```{r}
+trees_groups_parameters <- 
+  asv_per_group |> 
+  as_tibble(rownames = 'Group') |> 
+  dplyr::rename(nasvs = value) |> 
+  left_join(groups_to_trophic) |> 
+  mutate(height_composite = get_tree_height(num_seqs = nasvs, base_height = 0.1)) |> 
+  mutate(Group = factor(Group, levels = order_trees)) |> 
+  arrange(Group)
+
+trees_photo <- 
+  final_trees[trees_groups_parameters |> filter(trophic == 'photo') |> pull(Group) |> as.character()]
+      
+trees_phago <- 
+  final_trees[trees_groups_parameters |> filter(trophic == 'phago') |> pull(Group) |> as.character()]  
+
+plot_letters <- 
+  trees_groups_parameters |> 
+  group_by(trophic) |> 
+  mutate(letter = str_c('(',LETTERS[row_number()],') ')) |> 
+  ungroup() |> 
+  select(Group, letter) |> 
+  deframe()
+
+p_trees_photo <- 
+  trees_photo |> 
+  imap(
+    ~ {
+        if (.y == 'Prymnesiophyceae'){ # plot on top to display legend
+          plot_tree_all(tree = .x, perc_col = 'n',guides = T, add_title =str_c(plot_letters[[.y]],.y))
+        } else {
+          plot_tree_all(tree = .x, perc_col = 'n',guides = F, add_title =str_c(plot_letters[[.y]],.y))
+        }
+      }
+  )
+
+p_trees_phago <- 
+  trees_phago |> 
+  imap(
+    ~ {
+        if (.y == 'MAST-3'){
+          plot_tree_all(tree = .x, perc_col = 'n',guides = T, add_title =str_c(plot_letters[[.y]],.y))
+        } else {
+          plot_tree_all(tree = .x, perc_col = 'n',guides = F, add_title =str_c(plot_letters[[.y]],.y))
+        }
+      }
+  )
+
+figS5 <- 
+  p_trees_photo |> 
+  wrap_plots(
+    heights = trees_groups_parameters |> filter(trophic == 'photo') |> pull(height_composite)
+  )
+
+figS6 <- 
+  p_trees_phago |> 
+  wrap_plots(
+    heights = trees_groups_parameters |> filter(trophic == 'phago') |> pull(height_composite)
+  )
+
+ggsave(plot = figS5, filename = '../figures/figS5.pdf', height = 140, limitsize = F, width = 8)
+ggsave(plot = figS6, filename = '../figures/figS6.pdf', height = 120, limitsize = F, width = 6)
+```
+
+## Tables
+
+### Table 2
+
+```{r}
+asv_occurrence_per_layer <- 
+  order_trees |> 
+  set_names() |> 
+  map(
+    ~ asv_data_for_trees |> 
+      ungroup() |> 
+      arrange(cluster2) |> 
+      filter(Group == .x) |> 
+      select(label, cluster2, n) |> 
+      pivot_wider(names_from = label, values_from = n, values_fill = 0) |> 
+      column_to_rownames('cluster2')
+  )
+  
+matched_data <- 
+  order_trees |> 
+  set_names() |> 
+  map(~ match.phylo.comm(rooted_trees[[.x]], asv_occurrence_per_layer[[.x]]))
+
+phylo_distances <- 
+  order_trees |> 
+  set_names() |> 
+  map(~ cophenetic(matched_data[[.x]]$phy))
+
+null_models <- 
+  set_names(rep('independentswap', length(order_trees)), order_trees)
+
+null_models[["Kathablepharidacea"]] <- 'taxa.labels' # getting stuck with independentswap
+
+set.seed(123)
+
+ses_mntd_results <-
+  order_trees |>
+  set_names() |>
+  map(
+    ~ ses.mntd(
+      samp = matched_data[[.x]]$comm,
+      dis = phylo_distances[[.x]],
+      null.model = null_models[[.x]]
+      )
+  )
+
+ses_mpd_results <-
+  order_trees |>
+  set_names() |>
+  map(
+    ~ ses.mpd(
+      samp = matched_data[[.x]]$comm,
+      dis = phylo_distances[[.x]],
+      null.model = null_models[[.x]]
+    )
+  )
+
+table2 <- 
+  ses_mntd_results |> 
+  map(
+    ~ .x |> 
+      as_tibble(rownames = 'Clusters')
+  ) |> 
+  bind_rows(.id = 'Groups') |> 
+  select(Groups, Clusters, ntaxa, mntd.obs.z, mntd.obs.p) |> 
+  left_join(
+    ses_mpd_results |> 
+    map(
+      ~ .x |> 
+        as_tibble(rownames = 'Clusters')
+    ) |> 
+    bind_rows(.id = 'Groups') |> 
+    select(Groups, Clusters, ntaxa, mpd.obs.z, mpd.obs.p) 
+  )
+
+write_tsv(table2, '../tables/table2.tsv')
+```
+
+### Table S2
+
+```{r}
+clusters_summary_nasvs <-
+  clusters_df |>
+  map(
+    ~ .x |>
+      select(-profile_abb) |> 
+      left_join(profiles_abb) |> 
+      mutate(
+        cluster =
+          case_when(
+            str_detect(cluster_name, "Deep|Above") ~ str_remove(cluster_name, "[12]"), # unify duplicated layers into one
+            is.na(cluster_name) ~ cluster,
+            TRUE ~ cluster_name
+          )
+      ) |>
+      mutate(cluster = factor(cluster, levels = c("Surface", "Above", "DCM", "Below", "Deep", "low_membership", "low_abundance"))) |> 
+      distinct(asv_id, profile_abb, cluster) |> 
+      count(profile_abb, cluster) |> 
+      arrange(cluster) |> 
+      pivot_wider(names_from = cluster, values_from = n, values_fill = 0) |> 
+      rowwise() |> 
+      mutate(TOTAL = sum(c_across(Surface:low_abundance))) |>
+      dplyr::rename(Stations = profile_abb, `No cluster` = low_membership, `NA <0.01%` = low_abundance) |> 
+      arrange(Stations) |> 
+      select(Stations, TOTAL, everything())
+  ) |> 
+  bind_rows(.id = 'Dataset') |> 
+  rename_with(.cols = -c(Stations, Dataset, TOTAL), ~ str_c(.x,'_nasvs'))
+
+clusters_summary_reads <- 
+  clusters_df |>
+  map(
+    ~ .x |>
+      select(-profile_abb) |> 
+      left_join(profiles_abb) |> 
+      mutate(
+        cluster =
+          case_when(
+            str_detect(cluster_name, "Deep|Above") ~ str_remove(cluster_name, "[12]"), # unify duplicated layers into one
+            is.na(cluster_name) ~ cluster,
+            TRUE ~ cluster_name
+          )
+      ) |>
+      mutate(cluster = factor(cluster, levels = c("Surface", "Above", "DCM", "Below", "Deep", "low_membership", "low_abundance"))) |> 
+      group_by(profile_abb, cluster, sample) |> 
+      summarise(perc = sum(perc), .groups = 'drop_last') |> 
+      summarise(perc = mean(perc)) |> 
+      arrange(cluster) |> 
+      pivot_wider(names_from = cluster, values_from = perc, values_fill = 0) |> 
+      dplyr::rename(Stations = profile_abb, `No cluster` = low_membership, `NA <0.01%` = low_abundance)
+  )  |> 
+  bind_rows(.id = 'Dataset') |> 
+  rename_with(.cols = -c(Stations, Dataset), ~ str_c(.x,'_perc'))
+
+tableS2 <- 
+  clusters_summary_nasvs |> 
+  left_join(clusters_summary_reads)
+
+write_tsv(tableS2, '../tables/tableS2.tsv')
+```
+
+### Table S3
+
+```{r}
+cluster_summaries_clean <- 
+  cluster_summaries |> 
+  imap(
+    ~ {
+          n_layers <- if_else(.y == 'phago',2,3) 
+          .x |> 
+          ungroup() |> 
+          select(profile_abb, Group, perc, layer) |> 
+          filter(layer %in% c('Surface','DCM','Deep')) |> 
+          arrange(layer) |> 
+          mutate(layer = fct_inorder(as.character(layer))) |> 
+          group_by(Group) |> 
+          filter(n_distinct(layer) == n_layers) # avoid having empty layers for a given group
+      }
+  )
+
+cluster_stat_test <- 
+  cluster_summaries_clean |> 
+  imap(~ {
+    n_layers <- n_distinct(.x$layer)
+    
+    if (n_layers == 2) {
+      # Run Wilcoxon test for 2-layer sets
+      .x |> 
+        group_by(Group) |> 
+        reframe(broom::tidy(wilcox.test(perc ~ layer))) |> 
+        mutate(p.adj = p.adjust(p.value, method = "BH"))
+      
+    } else if (n_layers >= 3) {
+      # Run Kruskal-Wallis + Dunn test for 3-layer sets
+      run_kruskal_dunn(.x)
+    }
+  })
+
+supergroups <- 
+  tax_table(phy_table_pico) |> 
+  as_tibble() |> 
+  distinct(Group, Supergroup)
+
+tableS3 <- 
+  cluster_summaries_all |> 
+  imap(~ {
+    n_layers <- n_distinct(.x$layer)
+    
+    order_groups <- 
+      .x |>
+      group_by(Group) |>
+      summarise(total = sum(mean_perc)) |>
+      arrange(-total) |>
+      pull(Group)
+    
+    if (n_layers == 2) {
+        .x |> 
+        left_join(supergroups) |>
+        pivot_wider(names_from = layer, values_from = mean_perc, values_fill = 0) |> 
+        mutate(Average = mean(c_across(Surface:Deep), na.rm = TRUE)) |> 
+        left_join(cluster_stat_test[[.y]] |> select(Group, p.adj)) |> 
+        mutate(Group = factor(Group, levels = order_groups)) |> 
+        arrange(Group)
+      
+    } else if (n_layers >= 3) {
+      .x |> 
+        left_join(supergroups) |>
+        pivot_wider(names_from = layer, values_from = mean_perc, values_fill = 0) |> 
+        mutate(Average = mean(c_across(Surface:Deep), na.rm = TRUE)) |> 
+        left_join(
+          cluster_stat_test[[.y]]$kruskal |> 
+            select(Group, p.adj)
+        ) |> 
+        left_join(
+          cluster_stat_test[[.y]]$dunn |> 
+            select(Group, Comparison, P.adj) |> 
+            pivot_wider(names_from = Comparison, values_from = P.adj)
+          ) |> 
+        mutate(Group = factor(Group, levels = order_groups)) |> 
+        arrange(Group)
+    }
+  }
+  ) |> 
+  bind_rows(.id = 'Dataset')
+
+write_tsv(tableS3, '../tables/tableS3.tsv')
+```
+
