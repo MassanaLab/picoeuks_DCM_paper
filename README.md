@@ -4,13 +4,13 @@ This repository contains code and data included in:
 
 --------
 Béjar-Queijas, S., Obiol, A., Deulofeu-Capo, O., Marín-Vindas, C., Gazulla, C.R., Arrieta, J.M., Ferrera, I., Gasol, J.M., Sebastián, M., and Massana, R. (2026). Picoeukaryotic taxa display similar vertical preferences across the Deep Chlorophyll Maximum in contrasting oceanic regions.
+
 --------
 
 ## Scripts to reproduce all figures
 
 1. Download all scripts and data by using:
 
-```
 git clone https://github.com/MassanaLab/picoeuks_DCM_paper.git
 
 2. Install the following R packages: 
