@@ -674,7 +674,7 @@ add_geom_tile_occurrence <- function(tree_plot, metadata_occurrence){
       pwidth=pwidth
     ) +
     scale_fill_gradientn(
-      name = "Num.\nclusters", 
+      name = "Num.\nprofiles", 
       colours = colors, 
       limits = c(0, 14), 
       breaks = c(0, 7, 14),
@@ -716,7 +716,7 @@ plot_heatmap_layer <- function(tree, perc_col = 'n'){
     df |>
     ggplot(aes(x = cluster2, y = fct_rev(label))) + 
     geom_tile(aes(fill= perc), color = 'gray20', linewidth = .2) +
-    scale_fill_viridis_c(option ='mako', direction = -1, na.value = 'white', name = 'Num.\nclusters', 
+    scale_fill_viridis_c(option ='mako', direction = -1, na.value = 'white', name = 'Num.\nprofiles', 
                          guide = guide_colorbar(position = 'top', direction = 'horizontal'),
                          limits = c(0,14), breaks = c(0,7,14)) +
     scale_y_discrete(drop = F) +
